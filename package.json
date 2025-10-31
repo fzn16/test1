@@ -1,0 +1,14 @@
+{
+  "name": "mcp-oauth-server",
+  "version": "2.4.0",
+  "type": "module",
+  "scripts": {
+    "start": "node server-oauth.js",
+    "dev": "node --watch server-oauth.js"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "cors": "^2.8.5",
+    "@supabase/supabase-js": "^2.39.1"
+  }
+}
