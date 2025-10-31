@@ -81,12 +81,25 @@ function isChatGPTClient(clientId) {
 }
 
 // OAuth Discovery Endpoint (MUST be at root domain)
+app.get('/.well-known/oauth-protected-resource', (req, res) => {
+  res.json({
+    resource: BASE_URL,
+    authorization_servers: [`${BASE_URL}`],
+    bearer_methods_supported: ["header", "body"],
+    scopes_supported: ['mcp:read', 'mcp:write'],
+    resource_documentation: 'https://modelcontextprotocol.io',
+  });
+});
+
+// OAuth Discovery Endpoint (MUST be at root domain)
 app.get('/.well-known/oauth-authorization-server', (req, res) => {
   res.json({
     issuer: BASE_URL,
     authorization_endpoint: `${BASE_URL}/authorize`,
     token_endpoint: `${BASE_URL}/token`,
     registration_endpoint: `${BASE_URL}/register`,
+    revocation_endpoint: `${BASE_URL}/revoke`,
+    revocation_endpoint_auth_methods_supported: ['none'],
     response_types_supported: ['code'],
     response_modes_supported: ['query'],
     grant_types_supported: ['authorization_code', 'refresh_token'],
@@ -519,6 +532,13 @@ app.post('/token', (req, res) => {
   } else {
     res.status(400).json({ error: 'unsupported_grant_type' });
   }
+});
+
+// OAuth Token Endpoint
+app.post('/revoke', (req, res) => {
+  const { token, token_type_hint } = req.body;
+  
+  refreshTokens.delete(token)
 });
 
 // Dynamic Client Registration
