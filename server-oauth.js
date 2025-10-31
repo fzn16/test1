@@ -38,7 +38,32 @@ app.use((req, res, next) => {
 
   // Sanitize headers
   const safeHeaders = { ...req.headers };
-  if (safeHeaders.authorization) safeHeaders.authorization = '[REDACTED]';
+
+  // Mask authorization header instead of fully redacting
+  const maskToken = (val) => {
+    if (!val || typeof val !== 'string') return val;
+    // Preserve scheme if present (e.g., "Bearer <token>")
+    const parts = val.split(' ');
+    let scheme = null;
+    let token = val;
+    if (parts.length > 1) {
+      scheme = parts[0];
+      token = parts.slice(1).join(' ');
+    }
+    if (token.length <= 8) {
+      // keep last 2 chars, mask the rest
+      const visible = token.slice(-2);
+      const masked = '*'.repeat(Math.max(1, token.length - 2)) + visible;
+      return scheme ? `${scheme} ${masked}` : masked;
+    }
+    const prefix = token.slice(0, 6);
+    const suffix = token.slice(-4);
+    const middleMask = '*'.repeat(Math.max(4, token.length - 10));
+    const maskedToken = `${prefix}${middleMask}${suffix}`;
+    return scheme ? `${scheme} ${maskedToken}` : maskedToken;
+  };
+
+  if (safeHeaders.authorization) safeHeaders.authorization = maskToken(safeHeaders.authorization);
   if (safeHeaders.cookie) safeHeaders.cookie = '[REDACTED]';
 
   // Sanitize body (avoid logging passwords, code_verifier, etc.)
@@ -49,19 +74,85 @@ app.use((req, res, next) => {
       if (safeBody.password) safeBody.password = '[REDACTED]';
       if (safeBody.code_verifier) safeBody.code_verifier = '[REDACTED]';
       if (safeBody.client_secret) safeBody.client_secret = '[REDACTED]';
+      // If an authorization field appears in the body, mask it similarly
+      if (safeBody.authorization) safeBody.authorization = maskToken(safeBody.authorization);
     }
   } catch (e) {
     safeBody = '[unserializable body]';
   }
 
+  // Capture response body by wrapping write/end
+  const chunks = [];
+  const originalWrite = res.write.bind(res);
+  const originalEnd = res.end.bind(res);
+
+  res.write = (chunk, ...args) => {
+    try {
+      if (chunk) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+    } catch (e) { /* ignore capture errors */ }
+    return originalWrite(chunk, ...args);
+  };
+
+  res.end = (chunk, ...args) => {
+    try {
+      if (chunk) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+    } catch (e) { /* ignore capture errors */ }
+    return originalEnd(chunk, ...args);
+  };
+
+  // Helper to redact sensitive fields in objects
+  const redact = (obj, depth = 0) => {
+    if (obj == null || depth > 5) return obj;
+    if (Array.isArray(obj)) return obj.map(v => redact(v, depth + 1));
+    if (typeof obj === 'object') {
+      const out = {};
+      for (const [k, v] of Object.entries(obj)) {
+        const lk = k.toLowerCase();
+        if (['password', 'code_verifier', 'client_secret', 'access_token', 'refresh_token'].includes(lk)) {
+          out[k] = '[REDACTED]';
+        } else if (lk === 'authorization') {
+          out[k] = maskToken(v);
+        } else {
+          out[k] = redact(v, depth + 1);
+        }
+      }
+      return out;
+    }
+    return obj;
+  };
+
   console.log(`[${new Date().toISOString()}] → ${method} ${originalUrl} from ${ip}`);
-  console.log('Headers:', safeHeaders);
+  console.log('Request Headers:', safeHeaders);
   if (Object.keys(req.query || {}).length) console.log('Query:', req.query);
-  if (safeBody !== '[no body]') console.log('Body:', safeBody);
+  if (safeBody !== '[no body]') console.log('Request Body:', safeBody);
 
   res.on('finish', () => {
     const duration = Date.now() - start;
+    // Build safe response body
+    let safeResBody = '[no body]';
+    try {
+      const raw = Buffer.concat(chunks).toString('utf8');
+      if (raw && raw.length) {
+        // try parse JSON, otherwise log truncated string
+        try {
+          const parsed = JSON.parse(raw);
+          safeResBody = redact(parsed);
+        } catch {
+          safeResBody = raw.length > 1000 ? raw.slice(0, 1000) + '...[truncated]' : raw;
+        }
+      }
+    } catch (e) {
+      safeResBody = '[unserializable response]';
+    }
+
+    // Sanitize response headers
+    const resHeaders = { ...res.getHeaders() };
+    if (resHeaders['set-cookie']) resHeaders['set-cookie'] = '[REDACTED]';
+    if (resHeaders['authorization']) resHeaders['authorization'] = maskToken(resHeaders['authorization']);
+
     console.log(`[${new Date().toISOString()}] ← ${method} ${originalUrl} ${res.statusCode} ${duration}ms`);
+    console.log('Response Headers:', resHeaders);
+    console.log('Response Body:', safeResBody);
   });
 
   next();
